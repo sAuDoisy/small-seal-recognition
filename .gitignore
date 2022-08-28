@@ -1,0 +1,13 @@
+.idea/
+all_dataset/
+font_2_pic.sh
+infer.py
+just_for_test/
+model_with_CycleGAN.py
+package.sh
+package/
+sth_silly.py
+test_infer.sh
+train.py
+train.sh
+txt_dir/
