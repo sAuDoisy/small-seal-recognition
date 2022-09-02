@@ -15,7 +15,7 @@ class S2SModel:
     def __init__(self, input_nc=3, ngf=64, ndf=64,
                  Lconst_penalty=15, Lcategory_penalty=1, L1_penalty=100,
                  schedule=10, lr=0.001, gpu_ids=None, save_dir='.', is_training=True,
-                 image_size=256, tgt_vocab_size=408):
+                 image_size=256, tgt_vocab_size=409):
 
         if is_training:
             self.use_dropout = True
@@ -123,7 +123,7 @@ class S2SModel:
 
         # Transformer part
         # enc_inputs, dec_inputs, enc_outputs
-        gan_encoder_input = self.real_A_encoder_list[5].view(16, 512, 16)
+        gan_encoder_input = self.real_A_encoder_list[5].view(16, 16, 512)
         all_one = torch.ones_like(self.dec_inputs)
         self.logits, _, _ = self.TRM(all_one, self.dec_inputs, gan_encoder_input)
 
@@ -229,23 +229,19 @@ class S2SModel:
 
     def optimize_parameters(self):
         self.forward()  # compute fake images: G(A)
+
         # update D
         self.set_requires_grad(self.netD, True)  # enable backprop for D
         self.optimizer_D.zero_grad()  # set D's gradients to zero
         self.backward_D()  # calculate gradients for D
         self.optimizer_D.step()  # update D's weights
+
         # update G
         self.set_requires_grad(self.netD, False)  # D requires no gradients when optimizing G
+        self.set_requires_grad(self.netD, True)
         self.optimizer_G.zero_grad()  # set G's gradients to zero
         self.backward_G()  # calculate gradients for G
         self.optimizer_G.step()  # udpate G's weights
-
-        # update TRM
-        self.set_requires_grad(self.TRM, True)
-        self.optimizer_TRM.zero_grad()
-        self.trm_pre_loss = self.trm_loss(self.logits, self.target_batch.contiguous().view(-1))
-        self.trm_pre_loss.backward()
-        self.optimizer_TRM.step()
 
         # magic move to Optimize G again
         # according to https://github.com/carpedm20/DCGAN-tensorflow
@@ -254,6 +250,14 @@ class S2SModel:
         self.optimizer_G.zero_grad()  # set G's gradients to zero
         const_loss, l1_loss, cheat_loss = self.backward_G()  # calculate gradients for G
         self.optimizer_G.step()  # udpate G's weights
+
+        # update TRM
+        self.forward()
+        self.set_requires_grad(self.netG, False)
+        self.optimizer_TRM.zero_grad()
+        self.trm_pre_loss = self.trm_loss(self.logits, self.target_batch.contiguous().view(-1))
+        self.trm_pre_loss.backward()
+        self.optimizer_TRM.step()
         return const_loss, l1_loss, cheat_loss
 
     def set_requires_grad(self, nets, requires_grad=False):
@@ -330,9 +334,9 @@ class S2SModel:
             self.set_input(batch[0], batch[2], batch[1], batch[3])
             self.forward()
             tensor_to_plot = torch.cat([self.fake_AB, self.real_B], 3)
-            for label, image_tensor in zip(batch[0], tensor_to_plot):
-                style_name = label.split('_')[1]
+            for style_name, image_tensor in zip(batch[4], tensor_to_plot):
                 # label_dir = os.path.join(basename)
+                style_name = str(int(style_name))
                 chk_mkdir(style_name)
                 vutils.save_image(image_tensor, os.path.join(basename, style_name + '_' + str(cnt) + '.png'))
                 cnt += 1

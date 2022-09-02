@@ -4,18 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 import math
-
-
-# 10
-def get_attn_subsequent_mask(seq):
-    """
-    seq: [batch_size, tgt_len]
-    """
-    attn_shape = [seq.size(0), seq.size(1), seq.size(1)]
-    # attn_shape: [batch_size, tgt_len, tgt_len]
-    subsequence_mask = np.triu(np.ones(attn_shape), k=1)  # 生成一个上三角矩阵
-    subsequence_mask = torch.from_numpy(subsequence_mask).byte()
-    return subsequence_mask  # [batch_size, tgt_len, tgt_len]
+import os
 
 
 ## 7. ScaledDotProductAttention
@@ -89,26 +78,6 @@ class PoswiseFeedForwardNet(nn.Module):
         return self.layer_norm(output + residual)
 
 
-
-## 4. get_attn_pad_mask
-
-## 比如说，我现在的句子长度是5，在后面注意力机制的部分，我们在计算出来QK转置除以根号之后，softmax之前，我们得到的形状
-## len_input * len*input  代表每个单词对其余包含自己的单词的影响力
-
-## 所以这里我需要有一个同等大小形状的矩阵，告诉我哪个位置是PAD部分，之后在计算计算softmax之前会把这里置为无穷大；
-
-## 一定需要注意的是这里得到的矩阵形状是batch_size x len_q x len_k，我们是对k中的pad符号进行标识，并没有对k中的做标识，因为没必要
-
-## seq_q 和 seq_k 不一定一致，在交互注意力，q来自解码端，k来自编码端，所以告诉模型编码这边pad符号信息就可以，解码端的pad信息在交互注意力层是没有用到的；
-
-def get_attn_pad_mask(seq_q, seq_k):
-    batch_size, len_q = seq_q.size()
-    batch_size, len_k = seq_k.size()
-    # eq(zero) is PAD token
-    pad_attn_mask = seq_k.data.eq(0).unsqueeze(1)  # batch_size x 1 x len_k, one is masking
-    return pad_attn_mask.expand(batch_size, len_q, len_k)  # batch_size x len_q x len_k
-
-
 ## 3. PositionalEncoding 代码实现
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
@@ -156,11 +125,14 @@ class DecoderLayer(nn.Module):
 
 # 9. Decoder
 class Decoder(nn.Module):
-    def __init__(self, d_model, tgt_vocab_size, n_layers, d_ff, d_k, d_v, n_heads):
+    def __init__(self, d_model, tgt_vocab_size, n_layers, d_ff, d_k, d_v, n_heads, batch, seq_len):
         super(Decoder, self).__init__()
         self.tgt_emb = nn.Embedding(tgt_vocab_size, d_model)
         self.pos_emb = PositionalEncoding(d_model)
         self.layers = nn.ModuleList([DecoderLayer(d_model, d_ff, d_k, d_v, n_heads) for _ in range(n_layers)])
+        # get_attn_subsequent_mask 这个做的是自注意层的mask部分，就是当前单词之后看不到，使用一个上三角为1的矩阵
+        self.dec_self_attn_subsequent_mask = np.triu(np.ones([batch, seq_len, seq_len]), k=1)  # 生成一个上三角矩阵
+        self.dec_self_attn_subsequent_mask = torch.from_numpy(self.dec_self_attn_subsequent_mask).byte().to('cuda:0')
 
     def forward(self, dec_inputs, enc_inputs, enc_outputs): # dec_inputs : [batch_size x target_len]
         # print(dec_inputs.is_cuda)
@@ -168,17 +140,14 @@ class Decoder(nn.Module):
         dec_outputs = self.pos_emb(dec_outputs.transpose(0, 1)).transpose(0, 1) # [batch_size, tgt_len, d_model]
 
         # get_attn_pad_mask 自注意力层的时候的pad 部分
-        dec_self_attn_pad_mask = get_attn_pad_mask(dec_inputs, dec_inputs)
-
-        # get_attn_subsequent_mask 这个做的是自注意层的mask部分，就是当前单词之后看不到，使用一个上三角为1的矩阵
-        dec_self_attn_subsequent_mask = get_attn_subsequent_mask(dec_inputs)
+        dec_self_attn_pad_mask = self.get_attn_pad_mask(dec_inputs, dec_inputs)
 
         # 两个矩阵相加，大于0的为1，不大于0的为0，为1的在之后就会被fill到无限小
-        dec_self_attn_subsequent_mask = dec_self_attn_subsequent_mask.to('cuda:0')
-        dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask + dec_self_attn_subsequent_mask), 0)
+        # dec_self_attn_subsequent_mask = dec_self_attn_subsequent_mask.to('cuda:0')
+        dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask + self.dec_self_attn_subsequent_mask), 0)
 
         # 这个做的是交互注意力机制中的mask矩阵，enc的输入是k，我去看这个k里面哪些是pad符号，给到后面的模型；注意哦，我q肯定也是有pad符号，但是这里我不在意的，之前说了好多次了哈
-        dec_enc_attn_mask = get_attn_pad_mask(dec_inputs, enc_inputs)
+        dec_enc_attn_mask = self.get_attn_pad_mask(dec_inputs, enc_inputs)
 
         dec_self_attns, dec_enc_attns = [], []
         for layer in self.layers:
@@ -187,11 +156,26 @@ class Decoder(nn.Module):
             dec_enc_attns.append(dec_enc_attn)
         return dec_outputs, dec_self_attns, dec_enc_attns
 
+    ## 4. get_attn_pad_mask
+    ## 比如说，我现在的句子长度是5，在后面注意力机制的部分，我们在计算出来QK转置除以根号之后，softmax之前，我们得到的形状
+    ## len_input * len*input  代表每个单词对其余包含自己的单词的影响力
+    ## 所以这里我需要有一个同等大小形状的矩阵，告诉我哪个位置是PAD部分，之后在计算计算softmax之前会把这里置为无穷大；
+    ## 一定需要注意的是这里得到的矩阵形状是batch_size x len_q x len_k，我们是对k中的pad符号进行标识，并没有对k中的做标识，因为没必要
+    ## seq_q 和 seq_k 不一定一致，在交互注意力，q来自解码端，k来自编码端，所以告诉模型编码这边pad符号信息就可以，解码端的pad信息在交互注意力层是没有用到的；
+    def get_attn_pad_mask(self, seq_q, seq_k):
+        batch_size, len_q = seq_q.size()
+        batch_size, len_k = seq_k.size()
+        # eq(zero) is PAD token
+        pad_attn_mask = seq_k.data.eq(0).unsqueeze(1)  # batch_size x 1 x len_k, one is masking
+        return pad_attn_mask.expand(batch_size, len_q, len_k)  # batch_size x len_q x len_k
+
+
 # 1. 从整体网路结构来看，分为三个部分：编码层，解码层，输出层
 class Transformer(nn.Module):
-    def __init__(self, d_model=512, tgt_vocab_size=408, n_layers=6, d_ff=2048, d_k=64, d_v=64, n_heads=8):
+    def __init__(self, d_model=512, tgt_vocab_size=409, n_layers=6, d_ff=2048, d_k=64, d_v=64, n_heads=8, batch=16,
+                 seq_len=16):
         super(Transformer, self).__init__()
-        self.decoder = Decoder(d_model, tgt_vocab_size, n_layers, d_ff, d_k, d_v, n_heads)  # 解码层
+        self.decoder = Decoder(d_model, tgt_vocab_size, n_layers, d_ff, d_k, d_v, n_heads, batch, seq_len)  # 解码层
         self.projection = nn.Linear(d_model, tgt_vocab_size, bias=False)    # 输出层 d_model 是我们解码层每个token输出的维度大小，之后会做一个 tgt_vocab_size 大小的softmax
 
     def forward(self, enc_inputs, dec_inputs, enc_outputs):
