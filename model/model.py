@@ -57,8 +57,8 @@ class S2SModel:
         init_net(self.netG, gpu_ids=self.gpu_ids)
         init_net(self.netD, gpu_ids=self.gpu_ids)
 
-        self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=self.lr, betas=(0.5, 0.999))
-        self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=self.lr, betas=(0.5, 0.999))
+        self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=self.lr * 100, betas=(0.5, 0.999))
+        self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=self.lr / 100, betas=(0.5, 0.999))
         self.optimizer_TRM = torch.optim.Adam(self.TRM.parameters(), lr=self.lr)
 
         # self.category_loss = CategoryLoss(self.embedding_num)
@@ -337,7 +337,6 @@ class S2SModel:
             for style_name, image_tensor in zip(batch[4], tensor_to_plot):
                 # label_dir = os.path.join(basename)
                 style_name = str(int(style_name))
-                chk_mkdir(style_name)
                 vutils.save_image(image_tensor, os.path.join(basename, style_name + '_' + str(cnt) + '.png'))
                 cnt += 1
             # img = vutils.make_grid(tensor_to_plot)
